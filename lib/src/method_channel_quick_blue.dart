@@ -1,0 +1,182 @@
+import 'dart:async';
+
+import 'package:flutter/services.dart';
+import 'package:logging/logging.dart';
+
+import 'quick_blue_platform_interface.dart';
+
+class MethodChannelQuickBlue extends QuickBluePlatform {
+  static const _method = MethodChannel('quick_blue/method');
+  static const _eventScanResult = EventChannel('quick_blue/event.scanResult');
+  static const _eventAvailabilityChange =
+      EventChannel('quick_blue/event.availabilityChange');
+  static const _messageConnector = BasicMessageChannel(
+      'quick_blue/message.connector', StandardMessageCodec());
+
+  MethodChannelQuickBlue() {
+    _messageConnector.setMessageHandler(_handleConnectorMessage);
+  }
+
+  QuickLogger? _logger;
+
+  @override
+  void setLogger(QuickLogger logger) {
+    _logger = logger;
+  }
+
+  void _log(String message, {Level logLevel = Level.INFO}) {
+    _logger?.log(logLevel, message);
+  }
+
+  @override
+  Future<bool> isBluetoothAvailable() async {
+    bool result = await _method.invokeMethod('isBluetoothAvailable');
+    return result;
+  }
+
+  final Stream<int> _availabilityChangeStream = _eventAvailabilityChange
+      .receiveBroadcastStream({'name': 'availabilityChange'}).cast();
+
+  @override
+  Stream<int> get availabilityChangeStream => _availabilityChangeStream;
+
+  @override
+  Future<void> startScan(List<String>? serviceUUIDs) async { //DUMMY Note not XString
+    await _method.invokeMethod('startScan', {
+      'serviceUUIDs': serviceUUIDs,
+    });
+    _log('startScan invokeMethod success');
+  }
+
+  @override
+  Future<void> stopScan() async {
+    await _method.invokeMethod('stopScan');
+    _log('stopScan invokeMethod success');
+  }
+
+  final Stream<dynamic> _scanResultStream =
+      _eventScanResult.receiveBroadcastStream({'name': 'scanResult'});
+
+  @override
+  Stream<dynamic> get scanResultStream => _scanResultStream;
+
+  @override
+  Future<void> connect(String deviceId) async {
+    await _method.invokeMethod('connect', {
+      'deviceId': deviceId,
+    }).then((_) => _log('connect invokeMethod success'));
+  }
+
+  @override
+  Future<void> disconnect(String deviceId) async {
+    await _method.invokeMethod('disconnect', {
+      'deviceId': deviceId,
+    }).then((_) => _log('disconnect invokeMethod success'));
+  }
+
+  @override
+  Future<void> discoverServices(String deviceId) async {
+    await _method.invokeMethod('discoverServices', {
+      'deviceId': deviceId,
+    }).then((_) => _log('discoverServices invokeMethod success'));
+  }
+
+  Future<void> _handleConnectorMessage(dynamic message) async {
+    _log('_handleConnectorMessage $message', logLevel: Level.ALL);
+    if (message['ConnectionState'] != null) {
+      String deviceId = message['deviceId'];
+      BlueConnectionState connectionState =
+          BlueConnectionState.parse(message['ConnectionState']);
+      onConnectionChanged?.call(deviceId, connectionState);
+    } else if (message['ServiceState'] != null) {
+      if (message['ServiceState'] == 'discovered') {
+        String deviceId = message['deviceId'];
+        XString service = message['service'];
+        List<XString> characteristics = ((message['characteristics'] ?? []) as List).cast();
+        onServiceDiscovered?.call(deviceId, service, characteristics);
+      }
+    } else if (message['characteristicValue'] != null) { //DUMMY Propagate addition of service
+      String deviceId = message['deviceId'];
+      var characteristicValue = message['characteristicValue'];
+      XString service = characteristicValue['service'];
+      XString characteristic = characteristicValue['characteristic'];
+      Uint8List value = Uint8List.fromList(
+          characteristicValue['value']); // In case of _Uint8ArrayView
+      onValueChanged?.call(deviceId, service, characteristic, value);
+    } else if (message['wroteCharacteristicValue'] != null) { //DUMMY Propagate addition of service
+      String deviceId = message['deviceId'];
+      var characteristicValue = message['wroteCharacteristicValue'];
+      XString service = characteristicValue['service'];
+      XString characteristic = characteristicValue['characteristic'];
+      var value0 = characteristicValue['value'];
+      Uint8List? value = value0 == null ? null : Uint8List.fromList(value0); // In case of _Uint8ArrayView
+      bool success = characteristicValue['success'];
+      onWroteCharacteristic?.call(deviceId, service, characteristic, value, success);
+    } else if (message['mtuConfig'] != null) {
+      _mtuConfigController.add(message['mtuConfig']);
+    } else {
+      _log('_handleConnectorMessage $message is not implented.');
+    }
+  }
+
+  @override
+  Future<void> setNotifiable(String deviceId, XString service,
+      XString characteristic, BleInputProperty bleInputProperty) async {
+    await _method.invokeMethod('setNotifiable', {
+      'deviceId': deviceId,
+      'service': service,
+      'characteristic': characteristic,
+      'bleInputProperty': bleInputProperty.value,
+    }).then((_) => _log('setNotifiable invokeMethod success'));
+  }
+
+  @override
+  Future<void> readValue(
+      String deviceId, XString service, XString characteristic) async {
+    await _method.invokeMethod('readValue', {
+      'deviceId': deviceId,
+      'service': service,
+      'characteristic': characteristic,
+    }).then((_) => _log('readValue invokeMethod success'));
+  }
+
+  @override
+  Future<void> writeValue(
+    String deviceId,
+    XString service,
+    XString characteristic,
+    Uint8List value,
+    BleOutputProperty bleOutputProperty,
+  ) async {
+    await _method.invokeMethod('writeValue', {
+      'deviceId': deviceId,
+      'service': service,
+      'characteristic': characteristic,
+      'value': value,
+      'bleOutputProperty': bleOutputProperty.value,
+    }).then((_) {
+      _log('writeValue invokeMethod success', logLevel: Level.ALL);
+    }).catchError((onError) {
+      // Characteristic sometimes unavailable on Android
+      throw onError;
+    });
+  }
+
+  // FIXME Close
+  final _mtuConfigController = StreamController<int>.broadcast();
+
+  @override
+  Future<int> requestMtu(String deviceId, int expectedMtu) async {
+    await _method.invokeMethod('requestMtu', {
+      'deviceId': deviceId,
+      'expectedMtu': expectedMtu,
+    }).then((_) => _log('requestMtu invokeMethod success'));
+    int mtu = await _mtuConfigController.stream.first
+        .timeout(const Duration(milliseconds: 1500));
+    if (mtu == -1) {
+      throw Exception('Unable to set MTU size');
+    } else {
+      return mtu;
+    }
+  }
+}
